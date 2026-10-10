@@ -1,0 +1,5 @@
+# 不要把密钥和虚拟环境提交到 Git
+.env
+.venv/
+__pycache__/
+*.pyc
