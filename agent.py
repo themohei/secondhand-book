@@ -97,6 +97,24 @@ def call_vision(image_bytes, prompt, media_type="image/jpeg", temperature=0.2, m
     return resp.choices[0].message.content
 
 
+# ---------------- 防幻觉系统提示词（第四阶段优化） ----------------
+SYSTEM_PROMPT = (
+    "你是校园二手书交易智能体。务必遵守以下原则：\n"
+    "1. 只基于给定信息回答；信息里没有的事实（书名、出版社、年份、ISBN、价格、成交数据、文献）一律不要编造，"
+    "拿不准就直说「这个我不确定」。\n"
+    "2. 涉及具体数字（价格、折数、估价）时，优先使用本地书库给定数据，不要凭空估算权威行情。\n"
+    "3. 回答简洁、口语化，像学长学姐给建议，避免车轱辘话。"
+)
+
+
+def _grounded_llm(prompt, temperature=0.5, max_tokens=2000) -> str:
+    """带防幻觉系统提示词地调用模型（所有涉及事实/价格的回答都走这里）。"""
+    return call_llm([
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ], temperature=temperature, max_tokens=max_tokens)
+
+
 # ---------------- 通用小工具 ----------------
 def _ngrams(text, n=2):
     text = (text or "").lower()
@@ -225,9 +243,10 @@ def estimate_price(book, condition="八五新"):
         f"出版社：{book['publisher']}  版次：{book['edition']}\n"
         f"原价：{book['original_price']} 元  品相：{condition}\n"
         f"参考二手价区间：{low}-{high} 元\n"
-        f"要求：说明为什么是这个价，可提示同款书折价规律，但不要编造成交数据。"
+        f"要求：说明为什么是这个价（基于原价、品相、版次折旧），可提示折价规律；"
+        f"严禁编造任何成交数据、行情数字或未给出的出版信息，拿不准就直说。"
     )
-    explanation = call_llm([{"role": "user", "content": prompt}])
+    explanation = _grounded_llm(prompt)
     return low, high, explanation
 
 
@@ -238,9 +257,10 @@ def estimate_price_unknown(info, condition="八五新"):
         f"识别信息：书名《{info.get('title', '未知')}》 作者 {info.get('author', '未知')} "
         f"出版社 {info.get('publisher', '未知')} 版次 {info.get('edition', '未知')}\n"
         f"品相：{condition}\n"
-        f"要求：输出格式类似「估价区间：XX-XX 元。说明：……」"
+        f"要求：输出格式类似「估价区间：XX-XX 元。说明：……」；"
+        f"识别信息不全时不要硬猜出版社、年份、ISBN，说明按通用教材折价规律估算即可。"
     )
-    return call_llm([{"role": "user", "content": prompt}], temperature=0.5)
+    return _grounded_llm(prompt, temperature=0.5)
 
 
 # ---------------- 文案生成 ----------------
@@ -254,10 +274,11 @@ def generate_listing(book, condition, notes=""):
         f"要求：\n"
         f"1. 标题抓眼球（含书名和版次）；\n"
         f"2. 正文 80-150 字，口语化；\n"
-        f"3. 结构 = 书籍亮点 + 品相说明 + 适用课程 + 价格提示；\n"
-        f"4. 不要编造不存在的赠品或服务。"
+        f"3. 结构 = 书籍亮点 + 品相说明 + 适用课程 + 价格提示，但句式不要照搬固定模板；\n"
+        f"4. 避免「九五新/无笔记/大一新生/考研党」这类套话堆砌，换具体、真实一点的表达；\n"
+        f"5. 严禁编造不存在的赠品、服务、成交记录或库存信息。"
     )
-    return call_llm([{"role": "user", "content": prompt}], temperature=0.8)
+    return _grounded_llm(prompt, temperature=0.8)
 
 
 # ---------------- FAQ 检索（轻量 RAG）----------------
@@ -278,9 +299,10 @@ def answer_faq(question):
         f"你是校园二手书交易智能体的客服助手，请参考下面检索到的资料回答用户问题。\n\n"
         f"【资料】\n{context}\n\n"
         f"【用户问题】\n{question}\n\n"
-        f"要求：简洁、准确、口语化；资料不足时诚实说明并建议人工核实。"
+        f"要求：简洁、准确、口语化；只依据【资料】回答，资料没有的内容直接说「这个我不清楚」，"
+        f"绝不编造规则或价格，并建议人工核实。"
     )
-    return call_llm([{"role": "user", "content": prompt}], temperature=0.5)
+    return _grounded_llm(prompt, temperature=0.5)
 
 
 # ---------------- 教材核验（多本推荐）----------------
@@ -302,9 +324,10 @@ def verify_version(course):
     )
     prompt = (
         f"课程《{c}》的常用教材有以下几本，请用 2-3 句口语化的话提醒学生："
-        f"购买前务必以老师给出的 ISBN 和版次为准，避免买错版本。\n{lines}"
+        f"购买前务必以老师给出的 ISBN 和版次为准，避免买错版本。\n{lines}\n"
+        f"要求：只基于上面列出的教材做提醒，不要补充列表之外的教材或版次信息。"
     )
-    note = call_llm([{"role": "user", "content": prompt}], temperature=0.5)
+    note = _grounded_llm(prompt, temperature=0.5)
     return matched, note
 
 
@@ -315,10 +338,11 @@ def negotiate(book, seller_price, condition="八五新"):
         f"书名：《{book['title']}》{book['edition']} · {book['publisher']}\n"
         f"原价：{book['original_price']} 元  卖家报价：{seller_price} 元  品相：{condition}\n"
         f"本地参考二手价区间：{book['secondhand_price_low']}-{book['secondhand_price_high']} 元\n\n"
-        f"要求：1. 判断报价偏高/合理/偏低；2. 给出一个建议还价目标价；3. 给 1-2 句议价话术。"
-        f"口语化，控制在 4 句以内。"
+        f"要求：1. 基于「参考区间 × 品相」先算出建议目标价并说明依据；2. 判断报价偏高/合理/偏低；"
+        f"3. 给 1-2 句议价话术，口语化，控制在 4 句以内；"
+        f"4. 严禁用「谎称别人卖得更低」这类虚假锚点，也不编造行情数据。"
     )
-    return call_llm([{"role": "user", "content": prompt}], temperature=0.7)
+    return _grounded_llm(prompt, temperature=0.7)
 
 
 # ---------------- 交易安全 ----------------
@@ -340,11 +364,11 @@ def safety_check(text):
             f"你是校园二手书交易安全助手。买家描述的场景里检测到风险点：{warn}。\n"
             f"场景：{t}\n请用 2-4 句口语化的话给出具体避坑提醒（坚持平台担保、不私下转账、当面验货、保留记录等）。"
         )
-        advice = call_llm([{"role": "user", "content": prompt}], temperature=0.5)
+        advice = _grounded_llm(prompt, temperature=0.5)
         return hits, advice
     prompt = (
         f"你是校园二手书交易安全助手。买家描述的交易场景：{t}\n"
         f"请用 2-3 句口语化的话给出通用安全提醒（平台担保、当面验货、保留聊天记录）。"
     )
-    advice = call_llm([{"role": "user", "content": prompt}], temperature=0.5)
+    advice = _grounded_llm(prompt, temperature=0.5)
     return [], advice
